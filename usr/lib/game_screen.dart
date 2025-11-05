@@ -30,17 +30,35 @@ class GameScreen extends StatefulWidget {
   State<GameScreen> createState() => _GameScreenState();
 }
 
-class _GameScreenState extends State<GameScreen> {
+class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final SocketService _socketService = SocketService();
   Map<String, Player> _players = {};
   String _myId = '';
+
+  // For camera follow
+  late AnimationController _animationController;
+  Matrix4 _viewMatrix = Matrix4.identity();
 
   @override
   void initState() {
     super.initState();
     _myId = _socketService.socket.id!;
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200), // Controls camera smoothness
+    );
+
     _initializeGame(widget.initialData);
     _setupSocketListeners();
+
+    // Center camera after the first frame is built
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        final constraints =
+            BoxConstraints(maxWidth: MediaQuery.of(context).size.width, maxHeight: MediaQuery.of(context).size.height);
+        _centerOnPlayer(constraints);
+      }
+    });
   }
 
   // Initialize the game state with data received from the server.
@@ -80,8 +98,39 @@ class _GameScreenState extends State<GameScreen> {
     });
   }
 
+  // Animate the view matrix to smoothly center on the player.
+  void _centerOnPlayer(BoxConstraints constraints) {
+    if (!_players.containsKey(_myId)) return;
+
+    final player = _players[_myId]!;
+    final screenWidth = constraints.maxWidth;
+    final screenHeight = constraints.maxHeight;
+
+    // Target matrix to center the player
+    final targetMatrix = Matrix4.identity()
+      ..translate(screenWidth / 2 - player.x, screenHeight / 2 - player.y);
+
+    // Animate from current matrix to target matrix
+    final animation = Matrix4Tween(
+      begin: _viewMatrix,
+      end: targetMatrix,
+    ).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
+    );
+
+    animation.addListener(() {
+      if (mounted) {
+        setState(() {
+          _viewMatrix = animation.value;
+        });
+      }
+    });
+
+    _animationController.forward(from: 0.0);
+  }
+
   // Handle player movement via drag gestures and emit updates to the server.
-  void _onDragUpdate(DragUpdateDetails details) {
+  void _onDragUpdate(DragUpdateDetails details, BoxConstraints constraints) {
     if (_players.containsKey(_myId)) {
       final player = _players[_myId]!;
       final newX = player.x + details.delta.dx;
@@ -91,17 +140,21 @@ class _GameScreenState extends State<GameScreen> {
       final clampedX = newX.clamp(0.0, 950.0); // 1000 - 50 (player width)
       final clampedY = newY.clamp(0.0, 550.0); // 600 - 50 (player height)
 
-      setState(() {
-        player.x = clampedX;
-        player.y = clampedY;
-      });
-      _socketService.socket.emit('move', {'x': player.x, 'y': player.y});
+      if (player.x != clampedX || player.y != clampedY) {
+        setState(() {
+          player.x = clampedX;
+          player.y = clampedY;
+        });
+        _socketService.socket.emit('move', {'x': player.x, 'y': player.y});
+        _centerOnPlayer(constraints); // Update camera on move
+      }
     }
   }
 
   @override
   void dispose() {
     // Clean up listeners and inform the server that the player is leaving.
+    _animationController.dispose();
     _socketService.socket.off('player_joined');
     _socketService.socket.off('player_left');
     _socketService.socket.off('player_move');
@@ -116,22 +169,31 @@ class _GameScreenState extends State<GameScreen> {
         title: const Text('Game'),
         automaticallyImplyLeading: false, // Disable back button
       ),
-      body: GestureDetector(
-        onPanUpdate: _onDragUpdate,
-        child: Container(
-          width: double.infinity,
-          height: double.infinity,
-          color: Colors.grey[200],
-          child: Stack(
-            children: _players.values.map((player) {
-              return Positioned(
-                left: player.x,
-                top: player.y,
-                child: _buildPlayer(player),
-              );
-            }).toList(),
-          ),
-        ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          return GestureDetector(
+            onPanUpdate: (details) => _onDragUpdate(details, constraints),
+            child: ClipRect(
+              child: Transform(
+                transform: _viewMatrix,
+                child: Container(
+                  width: 1000,
+                  height: 600,
+                  color: Colors.grey[200],
+                  child: Stack(
+                    children: _players.values.map((player) {
+                      return Positioned(
+                        left: player.x,
+                        top: player.y,
+                        child: _buildPlayer(player),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
